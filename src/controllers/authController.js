@@ -13,7 +13,7 @@ import {
 } from "../services/emailService.js";
 
 const VERIFICATION_TOKEN_LIFETIME_MS = 24 * 60 * 60 * 1000;
-const VERIFICATION_RESEND_INTERVAL_MS = 60 * 1000;
+const VERIFICATION_RESEND_INTERVAL_MS = 30 * 1000;
 
 function createToken(user) {
   const secret = process.env.JWT_SECRET || "weathercart-super-secret-key-2026";
@@ -101,14 +101,17 @@ export async function register(req, res) {
     );
     if (existingUser) {
       if (isEmailVerificationEnabled() && !existingUser.emailVerified) {
-        const lastSent =
-          existingUser.emailVerificationLastSentAt?.getTime() || 0;
-        if (Date.now() - lastSent < VERIFICATION_RESEND_INTERVAL_MS) {
-          return res.status(409).json({
+        const elapsed = Date.now() - lastSent;
+        if (elapsed < VERIFICATION_RESEND_INTERVAL_MS) {
+          const remainingSec = Math.max(
+            1,
+            Math.ceil((VERIFICATION_RESEND_INTERVAL_MS - elapsed) / 1000)
+          );
+          return res.status(429).json({
             success: false,
-            code: "EMAIL_NOT_VERIFIED",
-            message:
-              "Verification email was already sent recently. Please check your inbox (including spam) or wait 1 minute before requesting again.",
+            code: "RESEND_COOLDOWN",
+            remainingSeconds: remainingSec,
+            message: `Please wait ${remainingSec}s before requesting a new verification email.`,
           });
         }
 
@@ -328,12 +331,20 @@ export async function resendVerificationEmail(req, res) {
       return res.json({ success: true, message });
     }
 
-    if (
-      user.emailVerificationLastSentAt &&
-      Date.now() - user.emailVerificationLastSentAt.getTime() <
-        VERIFICATION_RESEND_INTERVAL_MS
-    ) {
-      return res.json({ success: true, message });
+    if (user.emailVerificationLastSentAt) {
+      const elapsed = Date.now() - user.emailVerificationLastSentAt.getTime();
+      if (elapsed < VERIFICATION_RESEND_INTERVAL_MS) {
+        const remainingSec = Math.max(
+          1,
+          Math.ceil((VERIFICATION_RESEND_INTERVAL_MS - elapsed) / 1000)
+        );
+        return res.status(429).json({
+          success: false,
+          code: "RESEND_COOLDOWN",
+          remainingSeconds: remainingSec,
+          message: `Please wait ${remainingSec}s before requesting a new verification email.`,
+        });
+      }
     }
 
     try {
