@@ -14,21 +14,35 @@ async function seedDatabase() {
     await connectDB();
 
     if (mongoose.connection.readyState !== 1) {
-      console.error(
-        "Database seed skipped: MongoDB is not connected. Please ensure MongoDB is running or provide a valid MONGODB_URI in backend/.env"
+      throw new Error(
+        "MongoDB is not connected. Set a valid MONGODB_URI in backend/.env."
       );
-      process.exit(1);
     }
 
-    await Product.deleteMany({});
-    await Product.insertMany(catalogProducts);
-    console.log(`${catalogProducts.length} products inserted successfully`);
-
-    // Seed admin user
     const adminEmail = "admin@weathercart.com";
     const existing = await User.findOne({ email: adminEmail });
+
+    if (!existing && (!process.env.ADMIN_PASSWORD || process.env.ADMIN_PASSWORD.length < 12)) {
+      throw new Error(
+        "Set ADMIN_PASSWORD to a value with at least 12 characters in backend/.env before seeding the admin user."
+      );
+    }
+
+    const result = await Product.bulkWrite(
+      catalogProducts.map((product) => ({
+        updateOne: {
+          filter: { name: product.name },
+          update: { $setOnInsert: product },
+          upsert: true,
+        },
+      }))
+    );
+    console.log(
+      `Product catalog seeded: ${result.upsertedCount} inserted, ${catalogProducts.length - result.upsertedCount} already present`
+    );
+
     if (!existing) {
-      const hashedPassword = await bcrypt.hash("admin123", 10);
+      const hashedPassword = await bcrypt.hash(process.env.ADMIN_PASSWORD, 12);
       await User.create({
         name: "System Admin",
         email: adminEmail,
@@ -36,15 +50,24 @@ async function seedDatabase() {
         role: "admin",
         isActive: true,
       });
-      console.log(`Admin user created: ${adminEmail} (password: admin123)`);
+      console.log(`Admin user created: ${adminEmail}`);
+    } else {
+      console.log(`Admin user already exists: ${adminEmail}`);
     }
-
-    process.exit(0);
   } catch (error) {
     console.error("Database seed failed:");
     console.error(error.message);
-
-    process.exit(1);
+    process.exitCode = 1;
+  } finally {
+    if (mongoose.connection.readyState !== 0) {
+      try {
+        await mongoose.disconnect();
+      } catch (error) {
+        console.error("Failed to disconnect from MongoDB:");
+        console.error(error.message);
+        process.exitCode = 1;
+      }
+    }
   }
 }
 
