@@ -22,7 +22,7 @@ async function seedDatabase() {
     const adminEmail = "admin@weathercart.com";
     const existing = await User.findOne({ email: adminEmail });
 
-    if (!existing && (!process.env.ADMIN_PASSWORD || process.env.ADMIN_PASSWORD.length < 12)) {
+    if (!existing && (!process.env.ADMIN_PASSWORD || process.env.ADMIN_PASSWORD.length < 12 || process.env.ADMIN_PASSWORD === "omprakash31181")) {
       throw new Error(
         "Set ADMIN_PASSWORD to a value with at least 12 characters in backend/.env before seeding the admin user."
       );
