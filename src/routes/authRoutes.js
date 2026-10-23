@@ -4,6 +4,8 @@ import {
   register,
   login,
   getMe,
+  verifyEmail,
+  resendVerificationEmail,
 } from "../controllers/authController.js";
 
 import {
@@ -13,8 +15,9 @@ import {
 const router = express.Router();
 
 router.post("/register", register);
-
 router.post("/login", login);
+router.post("/verify-email", verifyEmail);
+router.post("/resend-verification", resendVerificationEmail);
 
 router.get("/me", protect, getMe);
 

@@ -15,6 +15,7 @@ import {
   protect,
   adminOnly,
 } from "../middleware/authMiddleware.js";
+import { requireVerifiedEmail } from "../middleware/requireVerifiedEmail.js";
 
 const router = express.Router();
 
@@ -25,7 +26,7 @@ router.post("/validate-coupon", validateCoupon);
 router.use(protect);
 
 /* Customer Order Routes */
-router.post("/", createOrder);
+router.post("/", requireVerifiedEmail, createOrder);
 router.post("/verify-payment", verifyPayment);
 router.get("/my-orders", getMyOrders);
 

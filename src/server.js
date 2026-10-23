@@ -15,6 +15,7 @@ import recommendationRoutes from "./routes/recommendationRoutes.js";
 import behaviorRoutes from "./routes/behaviorRoutes.js";
 import reviewRoutes from "./routes/reviewRoutes.js";
 import analyticsRoutes from "./routes/analyticsRoutes.js";
+import cartRoutes from "./routes/cartRoutes.js";
 
 dotenv.config();
 
@@ -96,6 +97,7 @@ app.use("/api/recommendations", recommendationRoutes);
 app.use("/api/behavior", behaviorRoutes);
 app.use("/api/reviews", reviewRoutes);
 app.use("/api/analytics", analyticsRoutes);
+app.use("/api/cart", cartRoutes);
 
 app.use((req, res) => {
   res.status(404).json({

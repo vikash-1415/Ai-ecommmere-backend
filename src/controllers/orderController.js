@@ -11,9 +11,32 @@ import {
 import { getMockBehavior } from "../services/mockBehaviorStore.js";
 import { catalogProducts } from "../data/mockCatalog.js";
 import { generateOrderNumber } from "../utils/orderNumber.js";
+import {
+  isSmtpConfigured,
+  sendOrderConfirmationEmail,
+  sendOrderStatusEmail,
+} from "../services/emailService.js";
 
 // In-memory fallback orders store for offline local dev
 const mockOrders = [];
+
+async function emailOrderStatusChange(order, status) {
+  if (!isSmtpConfigured()) return false;
+
+  try {
+    const orderWithUser =
+      order.user?.email
+        ? order
+        : await Order.findById(order._id).populate("user", "name email");
+    if (!orderWithUser?.user?.email) return false;
+
+    await sendOrderStatusEmail(orderWithUser.user, orderWithUser, status);
+    return true;
+  } catch (error) {
+    console.error("Order status email could not be sent:", error.message);
+    return false;
+  }
+}
 
 export const AVAILABLE_COUPONS = [
   {
@@ -277,11 +300,21 @@ export async function createOrder(req, res) {
         "user",
         "name email"
       );
+      let emailNotificationSent = false;
+      if (isSmtpConfigured() && populatedOrder.user?.email) {
+        try {
+          await sendOrderConfirmationEmail(populatedOrder.user, populatedOrder);
+          emailNotificationSent = true;
+        } catch (error) {
+          console.error("Order confirmation email could not be sent:", error.message);
+        }
+      }
 
       return res.status(201).json({
         success: true,
         message: "Order placed successfully",
         order: populatedOrder,
+        emailNotificationSent,
       });
     }
 
@@ -383,16 +416,33 @@ export async function verifyPayment(req, res) {
         });
       }
 
+      if (
+        order.user.toString() !== String(req.user.userId) &&
+        req.user.role !== "admin"
+      ) {
+        return res.status(403).json({
+          success: false,
+          message: "You are not allowed to update this order's payment",
+        });
+      }
+
+      const paymentChanged = order.paymentStatus !== "paid";
+      const statusChanged = order.status !== "confirmed";
       order.paymentStatus = "paid";
       order.status = "confirmed";
       order.transactionId = transactionId;
       if (paymentDetails) order.paymentDetails = paymentDetails;
       await order.save();
+      const emailNotificationSent =
+        isSmtpConfigured() &&
+        (paymentChanged || statusChanged) &&
+        await emailOrderStatusChange(order, order.status);
 
       return res.json({
         success: true,
         message: "Payment verified successfully",
         order,
+        emailNotificationSent,
       });
     }
 
@@ -410,16 +460,32 @@ export async function verifyPayment(req, res) {
       });
     }
 
+    if (
+      String(target.user?._id || target.user) !== String(req.user.userId) &&
+      req.user.role !== "admin"
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "You are not allowed to update this order's payment",
+      });
+    }
+
+    const paymentChanged = target.paymentStatus !== "paid";
+    const statusChanged = target.status !== "confirmed";
     target.paymentStatus = "paid";
     target.status = "confirmed";
     target.transactionId = transactionId;
     if (paymentDetails) target.paymentDetails = paymentDetails;
     target.updatedAt = new Date().toISOString();
+    const emailNotificationSent =
+      (paymentChanged || statusChanged) &&
+      await emailOrderStatusChange(target, target.status);
 
     res.json({
       success: true,
       message: "Payment verified successfully",
       order: target,
+      emailNotificationSent,
     });
   } catch (error) {
     res.status(500).json({
@@ -547,11 +613,16 @@ export async function cancelOrder(req, res) {
           $inc: { stock: item.quantity },
         });
       }
+      const emailNotificationSent = await emailOrderStatusChange(
+        order,
+        "cancelled"
+      );
 
       return res.json({
         success: true,
         message: "Order cancelled successfully",
         order,
+        emailNotificationSent,
       });
     }
 
@@ -579,11 +650,16 @@ export async function cancelOrder(req, res) {
 
     order.status = "cancelled";
     order.updatedAt = new Date().toISOString();
+    const emailNotificationSent = await emailOrderStatusChange(
+      order,
+      "cancelled"
+    );
 
     res.json({
       success: true,
       message: "Order cancelled successfully",
       order,
+      emailNotificationSent,
     });
   } catch (error) {
     res.status(500).json({
@@ -645,17 +721,7 @@ export async function updateOrderStatus(req, res) {
     const isDbConnected = mongoose.connection.readyState === 1;
 
     if (isDbConnected && mongoose.isValidObjectId(req.params.id)) {
-      const order = await Order.findByIdAndUpdate(
-        req.params.id,
-        {
-          status,
-          ...(status === "delivered" ? { paymentStatus: "paid" } : {}),
-        },
-        {
-          new: true,
-          runValidators: true,
-        }
-      );
+      const order = await Order.findById(req.params.id);
 
       if (!order) {
         return res.status(404).json({
@@ -664,10 +730,20 @@ export async function updateOrderStatus(req, res) {
         });
       }
 
+      const statusChanged = order.status !== status;
+      order.status = status;
+      if (status === "delivered") order.paymentStatus = "paid";
+      await order.save();
+
+      const emailNotificationSent = statusChanged
+        ? await emailOrderStatusChange(order, status)
+        : false;
+
       return res.json({
         success: true,
         message: "Order status updated",
         order,
+        emailNotificationSent,
       });
     }
 
@@ -685,16 +761,21 @@ export async function updateOrderStatus(req, res) {
       });
     }
 
+    const statusChanged = order.status !== status;
     order.status = status;
     if (status === "delivered") {
       order.paymentStatus = "paid";
     }
     order.updatedAt = new Date().toISOString();
+    const emailNotificationSent = statusChanged
+      ? await emailOrderStatusChange(order, status)
+      : false;
 
     res.json({
       success: true,
       message: "Order status updated",
       order,
+      emailNotificationSent,
     });
   } catch (error) {
     res.status(500).json({
