@@ -3,6 +3,10 @@ import cors from "cors";
 import dotenv from "dotenv";
 
 import { connectDB } from "./config/db.js";
+import {
+  DEFAULT_ALLOWED_ORIGINS,
+  DEFAULT_PORT,
+} from "./config/constants.js";
 import productRoutes from "./routes/productRoutes.js";
 import authRoutes from "./routes/authRoutes.js";
 import orderRoutes from "./routes/orderRoutes.js";
@@ -16,10 +20,9 @@ dotenv.config();
 
 const app = express();
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || DEFAULT_PORT;
 const allowedOrigins = new Set([
-  "http://localhost:5173",
-  "https://ai-ecommmere.vercel.app",
+  ...DEFAULT_ALLOWED_ORIGINS,
   ...(process.env.CLIENT_URL || "")
     .split(",")
     .map((origin) => origin.trim())
