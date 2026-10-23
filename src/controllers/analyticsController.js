@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import UserBehaviorEvent from "../models/UserBehaviorEvent.js";
 import Product from "../models/Product.js";
 import Order from "../models/Order.js";
+import User from "../models/User.js";
 import { catalogProducts } from "../data/mockCatalog.js";
 
 // In-memory event stream buffer (for real-time dashboard updates & offline DB fallback)
@@ -225,6 +226,104 @@ export async function getAnalyticsDashboard(req, res) {
     });
   } catch (err) {
     console.error("getAnalyticsDashboard error:", err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+}
+
+/**
+ * GET /api/analytics/admin-stats
+ * Real aggregated stats for admin overview dashboard
+ */
+export async function getAdminStats(req, res) {
+  try {
+    const isDbConnected = mongoose.connection.readyState === 1;
+
+    if (!isDbConnected) {
+      return res.json({
+        success: true,
+        totalRevenue: 0,
+        totalUsers: 0,
+        fulfillmentRate: 0,
+        monthlyRevenue: [],
+        statusBreakdown: {},
+      });
+    }
+
+    // Total revenue (non-cancelled orders)
+    const revenueAgg = await Order.aggregate([
+      { $match: { status: { $ne: "cancelled" } } },
+      { $group: { _id: null, total: { $sum: "$total" } } },
+    ]);
+    const totalRevenue = revenueAgg[0]?.total || 0;
+
+    // Total users
+    const totalUsers = await User.countDocuments();
+
+    // Order status breakdown
+    const statusAgg = await Order.aggregate([
+      { $group: { _id: "$status", count: { $sum: 1 } } },
+    ]);
+    const statusBreakdown = {};
+    let totalOrders = 0;
+    let deliveredOrders = 0;
+    for (const s of statusAgg) {
+      statusBreakdown[s._id] = s.count;
+      totalOrders += s.count;
+      if (s._id === "delivered") deliveredOrders = s.count;
+    }
+    const fulfillmentRate = totalOrders > 0
+      ? Math.round((deliveredOrders / totalOrders) * 100)
+      : 0;
+
+    // Monthly revenue for last 12 months
+    const now = new Date();
+    const twelveMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 11, 1);
+    const monthlyAgg = await Order.aggregate([
+      {
+        $match: {
+          status: { $ne: "cancelled" },
+          createdAt: { $gte: twelveMonthsAgo },
+        },
+      },
+      {
+        $group: {
+          _id: {
+            year: { $year: "$createdAt" },
+            month: { $month: "$createdAt" },
+          },
+          revenue: { $sum: "$total" },
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { "_id.year": 1, "_id.month": 1 } },
+    ]);
+
+    // Build 12-month array with labels
+    const monthNames = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    const monthlyRevenue = [];
+    for (let i = 0; i < 12; i++) {
+      const d = new Date(now.getFullYear(), now.getMonth() - 11 + i, 1);
+      const y = d.getFullYear();
+      const m = d.getMonth() + 1;
+      const found = monthlyAgg.find(a => a._id.year === y && a._id.month === m);
+      monthlyRevenue.push({
+        label: monthNames[m - 1],
+        year: y,
+        revenue: found?.revenue || 0,
+        orders: found?.count || 0,
+      });
+    }
+
+    return res.json({
+      success: true,
+      totalRevenue,
+      totalUsers,
+      fulfillmentRate,
+      monthlyRevenue,
+      statusBreakdown,
+    });
+  } catch (err) {
+    console.error("getAdminStats error:", err);
     return res.status(500).json({ success: false, message: err.message });
   }
 }

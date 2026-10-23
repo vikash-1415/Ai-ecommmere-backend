@@ -110,11 +110,16 @@ export async function register(req, res) {
         await issueVerificationEmail(user);
       } catch (error) {
         console.error("Verification email could not be sent:", error.message);
-        return res.status(503).json({
-          success: false,
+        // Account was created successfully — return 201 so frontend can redirect to verify-email
+        return res.status(201).json({
+          success: true,
           code: "VERIFICATION_EMAIL_FAILED",
+          emailSendFailed: true,
+          verificationRequired: true,
+          email: user.email,
           message:
-            "Your account was created, but the verification email could not be sent. Request a new email and try again.",
+            "Account created! Verification email could not be sent automatically. Please request a new one from the verify page.",
+          user: serializeUser(user),
         });
       }
     }
