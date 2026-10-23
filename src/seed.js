@@ -3,7 +3,9 @@ import mongoose from "mongoose";
 
 import { connectDB } from "./config/db.js";
 import Product from "./models/Product.js";
-import { products } from "./data/products.js";
+import User from "./models/User.js";
+import bcrypt from "bcryptjs";
+import { catalogProducts } from "./data/mockCatalog.js";
 
 dotenv.config();
 
@@ -19,12 +21,23 @@ async function seedDatabase() {
     }
 
     await Product.deleteMany({});
+    await Product.insertMany(catalogProducts);
+    console.log(`${catalogProducts.length} products inserted successfully`);
 
-    await Product.insertMany(products);
-
-    console.log(
-      `${products.length} products inserted successfully`
-    );
+    // Seed admin user
+    const adminEmail = "admin@weathercart.com";
+    const existing = await User.findOne({ email: adminEmail });
+    if (!existing) {
+      const hashedPassword = await bcrypt.hash("admin123", 10);
+      await User.create({
+        name: "System Admin",
+        email: adminEmail,
+        password: hashedPassword,
+        role: "admin",
+        isActive: true,
+      });
+      console.log(`Admin user created: ${adminEmail} (password: admin123)`);
+    }
 
     process.exit(0);
   } catch (error) {

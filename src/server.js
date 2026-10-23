@@ -9,6 +9,8 @@ import orderRoutes from "./routes/orderRoutes.js";
 import weatherRoutes from "./routes/weatherRoutes.js";
 import recommendationRoutes from "./routes/recommendationRoutes.js";
 import behaviorRoutes from "./routes/behaviorRoutes.js";
+import reviewRoutes from "./routes/reviewRoutes.js";
+import analyticsRoutes from "./routes/analyticsRoutes.js";
 
 dotenv.config();
 
@@ -23,7 +25,44 @@ app.use(
   })
 );
 
-app.use(express.json());
+// In-memory rate limiting map (IP -> { count, resetAt })
+const ipRateLimits = new Map();
+const RATE_LIMIT_WINDOW = 60 * 1000; // 1 minute
+const MAX_REQUESTS = 180; // 180 req/min per IP
+
+// 1. Production Security Headers Middleware
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "SAMEORIGIN");
+  res.setHeader("X-XSS-Protection", "1; mode=block");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  next();
+});
+
+// 2. IP Rate Limiting Middleware
+app.use((req, res, next) => {
+  const ip = req.ip || req.connection.remoteAddress || "global";
+  const now = Date.now();
+  const clientLimit = ipRateLimits.get(ip) || { count: 0, resetAt: now + RATE_LIMIT_WINDOW };
+
+  if (now > clientLimit.resetAt) {
+    clientLimit.count = 1;
+    clientLimit.resetAt = now + RATE_LIMIT_WINDOW;
+  } else {
+    clientLimit.count += 1;
+  }
+  ipRateLimits.set(ip, clientLimit);
+
+  if (clientLimit.count > MAX_REQUESTS) {
+    return res.status(429).json({
+      success: false,
+      message: "Too many requests. Please slow down and try again shortly.",
+    });
+  }
+  next();
+});
+
+app.use(express.json({ limit: "2mb" }));
 
 app.get("/api/health", (req, res) => {
   res.json({
@@ -38,11 +77,22 @@ app.use("/api/orders", orderRoutes);
 app.use("/api/weather", weatherRoutes);
 app.use("/api/recommendations", recommendationRoutes);
 app.use("/api/behavior", behaviorRoutes);
+app.use("/api/reviews", reviewRoutes);
+app.use("/api/analytics", analyticsRoutes);
 
 app.use((req, res) => {
   res.status(404).json({
     success: false,
     message: "API route not found",
+  });
+});
+
+// Safe global error handler - never leaks database internals or stack traces
+app.use((err, req, res, next) => {
+  console.error("Unhandled API error:", err);
+  res.status(err.status || 500).json({
+    success: false,
+    message: err.message || "An unexpected internal server error occurred",
   });
 });
 

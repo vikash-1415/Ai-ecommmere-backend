@@ -136,6 +136,21 @@ const orderSchema = new mongoose.Schema(
       default: "cod",
     },
 
+    couponCode: {
+      type: String,
+      default: "",
+    },
+
+    transactionId: {
+      type: String,
+      default: "",
+    },
+
+    paymentDetails: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {},
+    },
+
     paymentStatus: {
       type: String,
       enum: [

@@ -2,6 +2,8 @@ import express from "express";
 
 import {
   getProducts,
+  getSuggestions,
+  getFilterOptions,
   getProductById,
   createProduct,
   updateProduct,
@@ -15,7 +17,11 @@ import {
 
 const router = express.Router();
 
-/* Public */
+/* Public search and filter endpoints (must be before /:id) */
+router.get("/suggestions", getSuggestions);
+router.get("/filter-options", getFilterOptions);
+
+/* Product catalog */
 router.get("/", getProducts);
 router.get("/:id", getProductById);
 

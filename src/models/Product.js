@@ -59,6 +59,18 @@ const productSchema = new mongoose.Schema(
       },
     ],
 
+    brand: {
+      type: String,
+      default: "NorthPeak",
+      index: true,
+      trim: true,
+    },
+
+    weather: {
+      type: String,
+      default: "Rain",
+    },
+
     stock: {
       type: Number,
       default: 0,
@@ -79,6 +91,13 @@ const productSchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+
+productSchema.index({ name: 1 });
+productSchema.index({ category: 1, price: 1 });
+productSchema.index({ brand: 1, price: 1 });
+productSchema.index({ weatherTags: 1 });
+productSchema.index({ rating: -1 });
+productSchema.index({ createdAt: -1 });
 
 export default mongoose.model(
   "Product",

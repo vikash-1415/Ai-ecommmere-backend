@@ -1,219 +1,209 @@
-// ─────────────────────────────────────────────────────────
-//  Weather Normalization
-// ─────────────────────────────────────────────────────────
+export const RECOMMENDATION_ALGORITHM_VERSION = "step25-v1";
 
-export function normalizeWeather(weather) {
+const recommendationCache = new Map();
+const CACHE_TTL_MS = 60_000;
+const MAX_CACHE_ENTRIES = 500;
+
+export function normalizeWeather(weather = {}) {
   const temperature = Number(weather.temperature);
   const humidity = Number(weather.humidity);
   const condition = String(weather.condition || "").toLowerCase();
-
   const tags = new Set();
 
-  if (
-    condition.includes("rain") ||
-    condition.includes("drizzle") ||
-    condition.includes("thunder")
-  ) {
-    tags.add("rain");
-  }
-
-  if (condition.includes("cloud")) {
-    tags.add("cloudy");
-  }
-
-  if (condition.includes("clear") || condition.includes("sun")) {
+  if (/rain|drizzle|thunder/.test(condition)) tags.add("rain");
+  if (condition.includes("cloud")) tags.add("cloudy");
+  if (/clear|sun/.test(condition)) {
     tags.add("sunny");
     tags.add("clear");
   }
+  if (/snow|cold/.test(condition)) tags.add("cold");
+  if (temperature >= 32) tags.add("hot");
+  else if (temperature >= 24) tags.add("warm");
+  else if (temperature >= 15) tags.add("mild");
+  else tags.add("cold");
+  if (temperature < 15) tags.add("winter");
+  if (humidity >= 75) tags.add("humid");
 
-  if (temperature >= 32) {
-    tags.add("hot");
-  }
-
-  if (temperature >= 24 && temperature < 32) {
-    tags.add("warm");
-  }
-
-  if (temperature >= 15 && temperature < 24) {
-    tags.add("mild");
-  }
-
-  if (temperature < 15) {
-    tags.add("cold");
-    tags.add("winter");
-  }
-
-  if (humidity >= 75) {
-    tags.add("humid");
-  }
-
-  return {
-    temperature,
-    humidity,
-    condition,
-    tags: [...tags],
-  };
+  return { temperature, humidity, condition, tags: [...tags] };
 }
 
-// ─────────────────────────────────────────────────────────
-//  Basic Score (public recommendations, no behavior data)
-// ─────────────────────────────────────────────────────────
-
-export function calculateScore(product, weather) {
-  const weatherTags = new Set(
-    (weather.tags || []).map((t) => t.toLowerCase())
-  );
-  const productTags = (product.weatherTags || []).map((t) => t.toLowerCase());
-
-  let score = 0;
-
-  for (const tag of productTags) {
-    if (weatherTags.has(tag)) {
-      score += 20;
-    }
-  }
-
-  if (product.isFeatured) score += 5;
-  if (product.stock > 0) score += 3;
-
-  score += Math.min(Number(product.rating || 0) * 2, 10);
-
-  return Math.round(score);
+function asPlainObject(product) {
+  return typeof product?.toObject === "function" ? product.toObject() : product;
 }
 
-// ─────────────────────────────────────────────────────────
-//  Personalized Score (logged-in user, uses behavior data)
-// ─────────────────────────────────────────────────────────
-
-/**
- * Scoring breakdown:
- *  Weather match      →  +20 per matching tag (max ~40-60)
- *  Category preference→  +2 × score, capped at 20
- *  View history       →  +3 × count, capped at 15
- *  Wishlisted         →  +15 flat
- *  Product rating     →  +2 × rating, capped at 10
- *  Featured boost     →  +5
- *  In stock           →  +3
- */
-export function calculatePersonalizedScore(product, weather, behavior) {
-  let score = 0;
-
-  // 1. Weather matching
-  const weatherTags = new Set((weather.tags || []).map((t) => t.toLowerCase()));
-  for (const tag of product.weatherTags || []) {
-    if (weatherTags.has(tag.toLowerCase())) {
-      score += 20;
-    }
-  }
-
-  // 2. Category preference
+function scoreBreakdown(product, weather, behavior = null) {
+  const weatherTags = new Set((weather?.tags || []).map((tag) => String(tag).toLowerCase()));
+  const productTags = (product.weatherTags || []).map((tag) => String(tag).toLowerCase());
+  const weatherMatches = productTags.filter((tag) => weatherTags.has(tag));
   const categoryPreference = behavior?.preferredCategories?.find(
     (item) => item.category === product.category
   );
-  if (categoryPreference) {
-    score += Math.min(categoryPreference.score * 2, 20);
-  }
-
-  // 3. Previously viewed
   const viewed = behavior?.viewedProducts?.find(
     (item) => item.product?.toString() === product._id?.toString()
   );
-  if (viewed) {
-    score += Math.min(viewed.count * 3, 15);
-  }
-
-  // 4. Wishlisted
+  const purchased = behavior?.purchasedProducts?.some(
+    (id) => id?.toString() === product._id?.toString()
+  );
   const wishlisted = behavior?.wishlistProducts?.some(
     (id) => id?.toString() === product._id?.toString()
   );
-  if (wishlisted) {
-    score += 15;
-  }
 
-  // 5. Product quality signal
-  score += Math.min(Number(product.rating || 0) * 2, 10);
+  const components = {
+    weather: Math.min(weatherMatches.length * 20, 40),
+    categoryPreference: Math.min(Number(categoryPreference?.score || 0) * 2.5, 25),
+    behavior: Math.min(Number(viewed?.count || 0) * 1.5, 7.5) + (purchased ? 7.5 : 0),
+    wishlist: wishlisted ? 10 : 0,
+    quality: Math.min(Math.max(Number(product.rating || 0), 0), 5),
+    featured: product.isFeatured ? 3 : 0,
+    availability: Number(product.stock || 0) > 0 ? 2 : 0,
+  };
+  const score = Math.round(
+    Object.values(components).reduce((total, value) => total + value, 0)
+  );
 
-  // 6. Featured boost
-  if (product.isFeatured) score += 5;
-
-  // 7. Stock availability
-  if (product.stock > 0) score += 3;
-
-  return Math.round(score);
+  return { score, components, weatherMatches, wishlisted, purchased, categoryPreference };
 }
 
-// ─────────────────────────────────────────────────────────
-//  Recommendation Reason Generator
-// ─────────────────────────────────────────────────────────
+export function calculateScore(product, weather) {
+  return scoreBreakdown(asPlainObject(product), weather).score;
+}
 
-/**
- * Returns a human-readable reason + icon type for the recommendation.
- * Priority: weather → category preference → high rating → general
- */
+export function calculatePersonalizedScore(product, weather, behavior) {
+  return scoreBreakdown(asPlainObject(product), weather, behavior).score;
+}
+
 export function getRecommendationReason(product, weather, behavior) {
-  const weatherTags = new Set((weather.tags || []).map((t) => t.toLowerCase()));
+  const details = scoreBreakdown(asPlainObject(product), weather, behavior);
+  const factors = [];
 
-  const weatherMatch = (product.weatherTags || []).some((tag) =>
-    weatherTags.has(tag.toLowerCase())
-  );
-
-  const categoryMatch = behavior?.preferredCategories?.some(
-    (item) =>
-      item.category === product.category && item.score >= 3
-  );
-
-  const viewedRecently = behavior?.viewedProducts?.some(
-    (item) =>
-      item.product?.toString() === product._id?.toString() && item.count >= 2
-  );
-
-  const wishlisted = behavior?.wishlistProducts?.some(
-    (id) => id?.toString() === product._id?.toString()
-  );
-
-  if (weatherMatch) {
-    return {
-      type: "weather",
-      icon: "🌤️",
-      text: "Recommended for your current weather",
-    };
+  if (details.weatherMatches.length) {
+    factors.push(`Matches ${details.weatherMatches.join(", ")} weather`);
   }
-
-  if (wishlisted) {
-    return {
-      type: "wishlist",
-      icon: "❤️",
-      text: "In your wishlist — relevant today",
-    };
+  if (details.categoryPreference) {
+    factors.push(`Popular in your ${product.category} interests`);
   }
+  if (details.wishlisted) factors.push("From your wishlist");
+  if (details.purchased) factors.push("Related to a previous purchase");
+  if (Number(product.rating || 0) >= 4) factors.push("Highly rated");
+  if (factors.length === 0) factors.push("A highly rated in-stock product");
 
-  if (viewedRecently) {
-    return {
-      type: "viewed",
-      icon: "👀",
-      text: "Based on your recent browsing",
-    };
-  }
-
-  if (categoryMatch) {
-    return {
-      type: "preference",
-      icon: "✨",
-      text: "Based on your shopping interests",
-    };
-  }
-
-  if (Number(product.rating || 0) >= 4.5) {
-    return {
-      type: "popular",
-      icon: "🔥",
-      text: "Highly rated by shoppers",
-    };
-  }
+  const type = details.weatherMatches.length
+    ? "weather"
+    : details.wishlisted
+      ? "wishlist"
+      : details.categoryPreference
+        ? "preference"
+        : Number(product.rating || 0) >= 4.5
+          ? "popular"
+          : "general";
 
   return {
-    type: "general",
-    icon: "⭐",
-    text: "You may like this product",
+    type,
+    text: factors[0],
+    factors,
+    scoreBreakdown: details.components,
   };
+}
+
+export function scoreProduct(product, weather, behavior = null) {
+  const plainProduct = asPlainObject(product);
+  const details = scoreBreakdown(plainProduct, weather, behavior);
+  return {
+    product: plainProduct,
+    score: details.score,
+    match: Math.min(details.score, 100),
+    reason: getRecommendationReason(plainProduct, weather, behavior),
+  };
+}
+
+export function rankRecommendations(products, weather, behavior = null, limit = 8) {
+  const candidates = products
+    .map(asPlainObject)
+    .filter((product) => product.isActive !== false && Number(product.stock || 0) > 0)
+    .map((product) => scoreProduct(product, weather, behavior))
+    .sort((a, b) => b.score - a.score);
+
+  const ranked = [];
+  const categoryCounts = new Map();
+  const brandCounts = new Map();
+
+  while (candidates.length && ranked.length < limit) {
+    const index = candidates.findIndex(({ product }) =>
+      (categoryCounts.get(product.category) || 0) < 2 &&
+      (brandCounts.get(product.brand || "") || 0) < 2
+    );
+    const [item] = candidates.splice(index < 0 ? 0 : index, 1);
+    ranked.push(item);
+    categoryCounts.set(item.product.category, (categoryCounts.get(item.product.category) || 0) + 1);
+    brandCounts.set(item.product.brand || "", (brandCounts.get(item.product.brand || "") || 0) + 1);
+  }
+
+  return ranked;
+}
+
+export function findSimilarProducts(product, products, limit = 4) {
+  const current = asPlainObject(product);
+  const currentTags = new Set((current.weatherTags || []).map((tag) => String(tag).toLowerCase()));
+
+  return products
+    .map(asPlainObject)
+    .filter((candidate) =>
+      candidate.isActive !== false &&
+      Number(candidate.stock || 0) > 0 &&
+      candidate._id?.toString() !== current._id?.toString()
+    )
+    .map((candidate) => {
+      const tagMatches = (candidate.weatherTags || []).filter((tag) =>
+        currentTags.has(String(tag).toLowerCase())
+      ).length;
+      const sameCategory = candidate.category === current.category;
+      const priceRatio = Math.min(
+        Number(candidate.price || 0),
+        Number(current.price || 0)
+      ) / Math.max(Number(candidate.price || 0), Number(current.price || 0), 1);
+      return {
+        product: candidate,
+        score: (sameCategory ? 50 : 0) + tagMatches * 15 + Math.round(priceRatio * 20),
+      };
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map(({ product: candidate, score }) => ({
+      product: candidate,
+      score,
+      reason: {
+        type: "similar",
+        text: "Similar category, weather suitability, or price",
+        factors: [
+          ...(candidate.category === current.category ? ["Same category"] : []),
+          ...(candidate.weatherTags || []).filter((tag) => currentTags.has(String(tag).toLowerCase()))
+            .map((tag) => `Also suited to ${tag} weather`),
+        ],
+      },
+    }));
+}
+
+export function getCachedRecommendations(key) {
+  const entry = recommendationCache.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    recommendationCache.delete(key);
+    return null;
+  }
+  return entry.value;
+}
+
+export function cacheRecommendations(key, value) {
+  const now = Date.now();
+  for (const [cacheKey, entry] of recommendationCache) {
+    if (entry.expiresAt <= now) recommendationCache.delete(cacheKey);
+  }
+  if (!recommendationCache.has(key) && recommendationCache.size >= MAX_CACHE_ENTRIES) {
+    recommendationCache.delete(recommendationCache.keys().next().value);
+  }
+  recommendationCache.set(key, { value, expiresAt: now + CACHE_TTL_MS });
+}
+
+export function clearRecommendationCache() {
+  recommendationCache.clear();
 }

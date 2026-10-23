@@ -2,6 +2,8 @@ import express from "express";
 
 import {
   createOrder,
+  validateCoupon,
+  verifyPayment,
   getMyOrders,
   getMyOrder,
   cancelOrder,
@@ -16,11 +18,15 @@ import {
 
 const router = express.Router();
 
-// All order operations require valid authentication
+/* Public / Pre-checkout Coupon Validation */
+router.post("/validate-coupon", validateCoupon);
+
+/* Protected routes below */
 router.use(protect);
 
 /* Customer Order Routes */
 router.post("/", createOrder);
+router.post("/verify-payment", verifyPayment);
 router.get("/my-orders", getMyOrders);
 
 /* Admin Order Routes (declared before /:id) */

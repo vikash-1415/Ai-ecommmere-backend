@@ -1,241 +1,287 @@
 import mongoose from "mongoose";
-
+import Order from "../models/Order.js";
 import Product from "../models/Product.js";
 import UserBehavior from "../models/UserBehavior.js";
+import UserBehaviorEvent from "../models/UserBehaviorEvent.js";
+import { catalogProducts } from "../data/mockCatalog.js";
 import {
+  RECOMMENDATION_ALGORITHM_VERSION,
+  cacheRecommendations,
+  findSimilarProducts,
+  getCachedRecommendations,
   normalizeWeather,
-  calculateScore,
-  calculatePersonalizedScore,
-  getRecommendationReason,
+  rankRecommendations,
 } from "../services/recommendationService.js";
+import { getMockBehavior } from "../services/mockBehaviorStore.js";
 
-// ─────────────────────────────────────────────
-// Fallback catalog (MongoDB offline)
-// ─────────────────────────────────────────────
-const fallbackCatalog = [
-  {
-    _id: "1",
-    id: 1,
-    name: "Premium Rain Jacket",
-    category: "Fashion",
-    price: 1499,
-    oldPrice: 1999,
-    image:
-      "https://images.unsplash.com/photo-1544923246-77307dd654cb?auto=format&fit=crop&w=900&q=80",
-    rating: 4.8,
-    reviews: 124,
-    weatherTags: ["rain", "cloudy", "humid"],
-    suitableFor: ["monsoon", "travel", "outdoor"],
-    stock: 45,
-    isFeatured: true,
-    isActive: true,
-  },
-  {
-    _id: "2",
-    id: 2,
-    name: "Waterproof Travel Backpack",
-    category: "Bags",
-    price: 1199,
-    oldPrice: 1699,
-    image:
-      "https://images.unsplash.com/photo-1553062407-98eeb64c6a62?auto=format&fit=crop&w=900&q=80",
-    rating: 4.7,
-    reviews: 89,
-    weatherTags: ["rain", "cloudy"],
-    suitableFor: ["travel", "college", "office"],
-    stock: 60,
-    isFeatured: true,
-    isActive: true,
-  },
-  {
-    _id: "3",
-    id: 3,
-    name: "Lightweight Summer T-Shirt",
-    category: "Fashion",
-    price: 599,
-    oldPrice: 899,
-    image:
-      "https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?auto=format&fit=crop&w=900&q=80",
-    rating: 4.6,
-    reviews: 210,
-    weatherTags: ["sunny", "hot", "clear"],
-    suitableFor: ["summer", "casual"],
-    stock: 100,
-    isFeatured: true,
-    isActive: true,
-  },
-  {
-    _id: "4",
-    id: 4,
-    name: "Insulated Travel Mug",
-    category: "Lifestyle",
-    price: 799,
-    oldPrice: 1099,
-    image:
-      "https://images.unsplash.com/photo-1514228742587-6b1558fcca3d?auto=format&fit=crop&w=900&q=80",
-    rating: 4.9,
-    reviews: 154,
-    weatherTags: ["cold", "rain", "winter"],
-    suitableFor: ["office", "travel"],
-    stock: 75,
-    isFeatured: true,
-    isActive: true,
-  },
-  {
-    _id: "5",
-    id: 5,
-    name: "UV Protection Sunglasses",
-    category: "Accessories",
-    price: 899,
-    oldPrice: 1299,
-    image:
-      "https://images.unsplash.com/photo-1511499767150-a48a237f0083?auto=format&fit=crop&w=900&q=80",
-    rating: 4.5,
-    reviews: 76,
-    weatherTags: ["sunny", "hot"],
-    suitableFor: ["travel", "summer", "outdoor"],
-    stock: 40,
-    isFeatured: false,
-    isActive: true,
-  },
-  {
-    _id: "6",
-    id: 6,
-    name: "Breathable Running Shoes",
-    category: "Footwear",
-    price: 1299,
-    oldPrice: 1799,
-    image:
-      "https://images.unsplash.com/photo-1542291026-7eec264c27ff?auto=format&fit=crop&w=900&q=80",
-    rating: 4.6,
-    reviews: 203,
-    weatherTags: ["clear", "sunny", "warm"],
-    suitableFor: ["fitness", "outdoor", "casual"],
-    stock: 55,
-    isFeatured: true,
-    isActive: true,
-  },
-];
+const fallbackCatalog = catalogProducts;
 
-// ─────────────────────────────────────────────
-// Helper: get products (DB or fallback)
-// ─────────────────────────────────────────────
 async function getActiveProducts() {
-  const isDbConnected = mongoose.connection.readyState === 1;
-
-  if (isDbConnected) {
-    const products = await Product.find({ isActive: true });
-    if (products && products.length > 0) return products;
+  if (mongoose.connection.readyState === 1) {
+    try {
+      const products = await Product.find({ isActive: true }).lean();
+      if (products.length) return products;
+    } catch (error) {
+      console.error("Recommendation catalog lookup failed; using fallback catalog:", error);
+    }
   }
-
   return fallbackCatalog;
 }
 
-// ─────────────────────────────────────────────
-// GET /api/recommendations  (public)
-// ─────────────────────────────────────────────
+function getWeatherFromQuery(query, defaults = false) {
+  const temperature = Number(defaults ? query.temperature ?? 27 : query.temperature);
+  const humidity = Number(defaults ? query.humidity ?? 65 : query.humidity);
+  if (!Number.isFinite(temperature) || !Number.isFinite(humidity)) return null;
+  return normalizeWeather({
+    temperature,
+    humidity,
+    condition: query.condition || (defaults ? "Clear" : ""),
+  });
+}
+
+async function getBehavior(userId) {
+  if (mongoose.connection.readyState !== 1) return getMockBehavior(userId);
+  try {
+    return await UserBehavior.findOne({ user: userId }).lean();
+  } catch (error) {
+    console.error("Recommendation profile lookup failed; using non-personalized ranking:", error);
+    return null;
+  }
+}
+
+async function recordImpressions(recommendations, userId, weather) {
+  if (mongoose.connection.readyState !== 1 || recommendations.length === 0) return;
+  try {
+    await UserBehaviorEvent.insertMany(
+      recommendations.map(({ product }) => ({
+        user: mongoose.isValidObjectId(userId) ? userId : null,
+        eventType: "recommendation_impression",
+        product: mongoose.isValidObjectId(product._id) ? product._id : null,
+        category: product.category || "",
+        algorithmVersion: RECOMMENDATION_ALGORITHM_VERSION,
+        metadata: { weatherTags: weather.tags },
+      })),
+      { ordered: false }
+    );
+  } catch (error) {
+    console.error("Recommendation impression analytics could not be recorded:", error);
+  }
+}
+
+async function buildRecommendations(req, res, personalized) {
+  const weather = getWeatherFromQuery(req.query, !personalized);
+  if (!weather) {
+    return res.status(400).json({
+      success: false,
+      message: "Valid weather data is required",
+    });
+  }
+
+  const behavior = personalized ? await getBehavior(req.user.userId) : null;
+  const cacheKey = JSON.stringify({
+    algorithm: RECOMMENDATION_ALGORITHM_VERSION,
+    user: personalized ? req.user.userId : "public",
+    weather: [weather.temperature, weather.humidity, weather.condition],
+    profileUpdatedAt: behavior?.updatedAt || null,
+  });
+  let recommendations = getCachedRecommendations(cacheKey);
+
+  if (!recommendations) {
+    const products = await getActiveProducts();
+    recommendations = rankRecommendations(products, weather, behavior, 8);
+    if (!recommendations.length) {
+      recommendations = rankRecommendations(fallbackCatalog, weather, behavior, 8);
+    }
+    cacheRecommendations(cacheKey, recommendations);
+  }
+
+  await recordImpressions(recommendations, personalized ? req.user.userId : null, weather);
+  const hasBehaviorSignals = Boolean(
+    behavior &&
+    (
+      behavior.preferredCategories?.length ||
+      behavior.viewedProducts?.length ||
+      behavior.wishlistProducts?.length ||
+      behavior.purchasedProducts?.length
+    )
+  );
+  return res.json({
+    success: true,
+    weather,
+    personalized: Boolean(personalized && hasBehaviorSignals),
+    algorithmVersion: RECOMMENDATION_ALGORITHM_VERSION,
+    recommendations,
+  });
+}
+
 export async function getRecommendations(req, res) {
   try {
-    const temperature = Number(req.query.temperature ?? 27);
-    const humidity = Number(req.query.humidity ?? 65);
-    const condition = req.query.condition || "Clear";
-
-    if (!Number.isFinite(temperature) || !Number.isFinite(humidity)) {
-      return res.status(400).json({
-        success: false,
-        message: "Valid weather data is required",
-      });
-    }
-
-    const normalizedWeather = normalizeWeather({ temperature, humidity, condition });
-    const products = await getActiveProducts();
-
-    const recommendations = products
-      .map((product) => {
-        const pObj = product.toObject ? product.toObject() : product;
-        const score = calculateScore(pObj, normalizedWeather);
-        const reason = getRecommendationReason(pObj, normalizedWeather, null);
-        return { product: pObj, score, reason, match: Math.min(Math.round((score / 50) * 100), 99) };
-      })
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 8);
-
-    res.json({
-      success: true,
-      weather: normalizedWeather,
-      recommendations: recommendations.map(({ product, score, match, reason }) => ({
-        product,
-        score,
-        match,
-        reason,
-      })),
-    });
+    return await buildRecommendations(req, res, false);
   } catch (error) {
     console.error("Recommendations error:", error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "Failed to generate recommendations",
-      error: error.message,
     });
   }
 }
 
-// ─────────────────────────────────────────────
-// GET /api/recommendations/personalized  (protected)
-// ─────────────────────────────────────────────
 export async function getPersonalizedRecommendations(req, res) {
   try {
-    const temperature = Number(req.query.temperature);
-    const humidity = Number(req.query.humidity);
-    const condition = req.query.condition || "";
+    return await buildRecommendations(req, res, true);
+  } catch (error) {
+    console.error("Personalized recommendations error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to generate personalized recommendations",
+    });
+  }
+}
 
-    if (!Number.isFinite(temperature) || !Number.isFinite(humidity)) {
-      return res.status(400).json({
-        success: false,
-        message: "Valid weather data is required",
-      });
-    }
-
-    const normalizedWeather = normalizeWeather({ temperature, humidity, condition });
-
-    // Fetch behavior — optional; scoring degrades gracefully if null
-    let behavior = null;
+async function findProduct(id) {
+  if (mongoose.connection.readyState === 1 && mongoose.isValidObjectId(id)) {
     try {
-      if (mongoose.connection.readyState === 1) {
-        behavior = await UserBehavior.findOne({ user: req.user.userId });
-      }
-    } catch {
-      // DB offline — continue with weather-only scoring
+      const product = await Product.findById(id).lean();
+      if (product) return product;
+    } catch (error) {
+      console.error("Recommendation product lookup failed; checking fallback catalog:", error);
+    }
+  }
+  return fallbackCatalog.find((product) =>
+    product._id?.toString() === id || String(product.id) === id
+  ) || null;
+}
+
+export async function getSimilarProducts(req, res) {
+  try {
+    const product = await findProduct(req.params.id);
+    if (!product) {
+      return res.status(404).json({ success: false, message: "Product not found" });
+    }
+    const results = findSimilarProducts(product, await getActiveProducts());
+    return res.json({
+      success: true,
+      algorithmVersion: RECOMMENDATION_ALGORITHM_VERSION,
+      recommendations: results,
+    });
+  } catch (error) {
+    console.error("Similar products error:", error);
+    return res.status(500).json({ success: false, message: "Failed to find similar products" });
+  }
+}
+
+export async function getFrequentlyBoughtTogether(req, res) {
+  try {
+    const product = await findProduct(req.params.id);
+    if (!product) {
+      return res.status(404).json({ success: false, message: "Product not found" });
     }
 
-    const products = await getActiveProducts();
+    let recommendations = [];
+    if (mongoose.connection.readyState === 1 && mongoose.isValidObjectId(product._id)) {
+      try {
+        const orders = await Order.find({
+          status: { $ne: "cancelled" },
+          "items.product": product._id,
+        }).select("items.product").lean();
+        const counts = new Map();
+        for (const order of orders) {
+          const orderProductIds = new Set(order.items.map((item) => item.product?.toString()));
+          if (!orderProductIds.has(product._id.toString())) continue;
+          for (const id of orderProductIds) {
+            if (id !== product._id.toString()) counts.set(id, (counts.get(id) || 0) + 1);
+          }
+        }
 
-    const recommendations = products
-      .map((product) => {
-        const pObj = product.toObject ? product.toObject() : product;
-        const score = calculatePersonalizedScore(pObj, normalizedWeather, behavior);
-        const reason = getRecommendationReason(pObj, normalizedWeather, behavior);
-        return { product: pObj, score, reason };
-      })
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 8)
-      .map((item, idx) => ({
-        ...item,
-        // Rank-based match percentage so top product always looks relevant
-        match: Math.max(99 - idx * 4, 60),
-      }));
+        const sortedIds = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4);
+        if (sortedIds.length) {
+          const products = await Product.find({
+            _id: { $in: sortedIds.map(([id]) => id) },
+            isActive: true,
+            stock: { $gt: 0 },
+          }).lean();
+          const rank = new Map(sortedIds.map(([id, count]) => [id, count]));
+          recommendations = products
+            .sort((a, b) => rank.get(b._id.toString()) - rank.get(a._id.toString()))
+            .map((item) => ({
+              product: item,
+              score: rank.get(item._id.toString()),
+              reason: {
+                type: "frequently-bought-together",
+                text: "Often purchased in the same order",
+                factors: [`Bought together in ${rank.get(item._id.toString())} orders`],
+              },
+            }));
+        }
+      } catch (error) {
+        console.error("Purchase history recommendations failed; using related-product fallback:", error);
+      }
+    }
 
-    res.json({
+    if (!recommendations.length) {
+      recommendations = findSimilarProducts(product, await getActiveProducts())
+        .slice(0, 4)
+        .map((item) => ({
+          ...item,
+          reason: {
+            type: "bundle-fallback",
+            text: "Complementary picks while purchase history builds",
+            factors: item.reason.factors,
+          },
+        }));
+    }
+
+    return res.json({
       success: true,
-      weather: normalizedWeather,
-      personalized: true,
+      algorithmVersion: RECOMMENDATION_ALGORITHM_VERSION,
+      fallback: !mongoose.connection.readyState || recommendations.some(
+        (item) => item.reason.type === "bundle-fallback"
+      ),
       recommendations,
     });
   } catch (error) {
-    console.error("Personalized recommendations error:", error);
-    res.status(500).json({
+    console.error("Frequently bought together error:", error);
+    return res.status(500).json({
       success: false,
-      message: "Failed to generate personalized recommendations",
+      message: "Failed to generate bundle recommendations",
+    });
+  }
+}
+
+export async function getRecommendationAnalytics(req, res) {
+  try {
+    if (mongoose.connection.readyState !== 1) {
+      return res.status(503).json({
+        success: false,
+        message: "Recommendation analytics require a database connection",
+      });
+    }
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const summary = await UserBehaviorEvent.aggregate([
+      { $match: { createdAt: { $gte: since } } },
+      {
+        $group: {
+          _id: { eventType: "$eventType", algorithmVersion: "$algorithmVersion" },
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { "_id.eventType": 1 } },
+    ]);
+    return res.json({
+      success: true,
+      periodDays: 30,
+      algorithmVersion: RECOMMENDATION_ALGORITHM_VERSION,
+      summary: summary.map(({ _id, count }) => ({
+        eventType: _id.eventType,
+        algorithmVersion: _id.algorithmVersion || null,
+        count,
+      })),
+    });
+  } catch (error) {
+    console.error("Recommendation analytics error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to load recommendation analytics",
     });
   }
 }

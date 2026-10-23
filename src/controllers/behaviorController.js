@@ -1,71 +1,45 @@
 import mongoose from "mongoose";
-import UserBehavior from "../models/UserBehavior.js";
 import Product from "../models/Product.js";
+import UserBehavior from "../models/UserBehavior.js";
+import UserBehaviorEvent from "../models/UserBehaviorEvent.js";
+import { catalogProducts } from "../data/mockCatalog.js";
+import { clearRecommendationCache } from "../services/recommendationService.js";
+import { getMockBehavior } from "../services/mockBehaviorStore.js";
 
-// ─────────────────────────────────────────────
-// In-memory mock store (MongoDB offline fallback)
-// ─────────────────────────────────────────────
-const mockBehaviorStore = new Map();
-
-function getMockBehavior(userId) {
-  if (!mockBehaviorStore.has(userId)) {
-    mockBehaviorStore.set(userId, {
-      user: userId,
-      viewedProducts: [],
-      wishlistProducts: [],
-      purchasedProducts: [],
-      preferredCategories: [],
-      weatherPreferences: [],
-    });
-  }
-  return mockBehaviorStore.get(userId);
-}
-
-// ─────────────────────────────────────────────
-// Helper: get or create behavior document
-// ─────────────────────────────────────────────
 async function getOrCreateBehavior(userId) {
-  const isDbConnected = mongoose.connection.readyState === 1;
-
-  if (!isDbConnected) {
+  if (mongoose.connection.readyState !== 1) {
     return { doc: getMockBehavior(userId), mock: true };
   }
-
   let behavior = await UserBehavior.findOne({ user: userId });
-  if (!behavior) {
-    behavior = await UserBehavior.create({ user: userId });
-  }
+  if (!behavior) behavior = await UserBehavior.create({ user: userId });
   return { doc: behavior, mock: false };
 }
 
-// ─────────────────────────────────────────────
-// POST /api/behavior/view
-// ─────────────────────────────────────────────
-export async function trackProductView(req, res) {
-  try {
-    const { productId } = req.body;
+async function resolveProduct(productId) {
+  const fallback = catalogProducts.find(
+    (item) => item._id?.toString() === productId || String(item.id) === productId
+  );
+  if (mongoose.connection.readyState === 1 && mongoose.isValidObjectId(productId)) {
+    return (await Product.findById(productId).select("category").lean()) || fallback || null;
+  }
+  return fallback || null;
+}
 
-    if (!productId) {
-      return res.status(400).json({ success: false, message: "productId is required" });
-    }
+async function trackEvent(req, res, eventType, categoryWeight, metadata = {}) {
+  const productId = String(req.body.productId || "");
+  if (!productId) {
+    return res.status(400).json({ success: false, message: "productId is required" });
+  }
 
-    const isDbConnected = mongoose.connection.readyState === 1;
-    let product = null;
+  const product = await resolveProduct(productId);
+  const category = product?.category || "";
+  const validProductId = mongoose.isValidObjectId(productId);
+  const { doc: behavior, mock } = await getOrCreateBehavior(req.user.userId);
 
-    if (isDbConnected) {
-      product = await Product.findById(productId).select("category weatherTags");
-    }
-
-    // Gracefully skip if product not found in DB (might be mock/static id)
-    const category = product?.category || null;
-
-    const { doc: behavior, mock } = await getOrCreateBehavior(req.user.userId);
-
-    // Update viewed products
+  if (eventType === "product_view" && validProductId) {
     const existing = behavior.viewedProducts.find(
       (item) => item.product?.toString() === productId
     );
-
     if (existing) {
       existing.count += 1;
       existing.lastViewedAt = new Date();
@@ -76,103 +50,89 @@ export async function trackProductView(req, res) {
         lastViewedAt: new Date(),
       });
     }
-
-    // Update category preference (+1 for view)
-    if (category) {
-      const catPref = behavior.preferredCategories.find(
-        (item) => item.category === category
-      );
-      if (catPref) {
-        catPref.score += 1;
-      } else {
-        behavior.preferredCategories.push({ category, score: 1 });
-      }
-    }
-
-    if (!mock) {
-      await behavior.save();
-    }
-
-    res.json({ success: true, message: "View tracked" });
-  } catch (error) {
-    console.error("trackProductView error:", error);
-    res.status(500).json({ success: false, message: "Failed to track activity" });
   }
-}
 
-// ─────────────────────────────────────────────
-// POST /api/behavior/wishlist
-// ─────────────────────────────────────────────
-export async function trackWishlist(req, res) {
-  try {
-    const { productId } = req.body;
-
-    if (!productId) {
-      return res.status(400).json({ success: false, message: "productId is required" });
-    }
-
-    const isDbConnected = mongoose.connection.readyState === 1;
-    let product = null;
-
-    if (isDbConnected) {
-      product = await Product.findById(productId).select("category");
-    }
-
-    const category = product?.category || null;
-
-    const { doc: behavior, mock } = await getOrCreateBehavior(req.user.userId);
-
-    // Add to wishlist if not already there
+  if (eventType === "wishlist_add" && validProductId) {
     const alreadyExists = behavior.wishlistProducts.some(
       (id) => id?.toString() === productId
     );
-    if (!alreadyExists) {
-      behavior.wishlistProducts.push(productId);
-    }
+    if (!alreadyExists) behavior.wishlistProducts.push(productId);
+  }
 
-    // Update category preference (+3 for wishlist — stronger signal)
-    if (category) {
-      const catPref = behavior.preferredCategories.find(
-        (item) => item.category === category
-      );
-      if (catPref) {
-        catPref.score += 3;
-      } else {
-        behavior.preferredCategories.push({ category, score: 3 });
-      }
-    }
+  if (category && categoryWeight) {
+    const preference = behavior.preferredCategories.find(
+      (item) => item.category === category
+    );
+    if (preference) preference.score += categoryWeight;
+    else behavior.preferredCategories.push({ category, score: categoryWeight });
+  }
 
-    if (!mock) {
-      await behavior.save();
-    }
+  if (!mock) {
+    await behavior.save();
+    await UserBehaviorEvent.create({
+      user: req.user.userId,
+      eventType,
+      product: validProductId ? productId : null,
+      category,
+      algorithmVersion: metadata.algorithmVersion || "",
+      metadata,
+    });
+  }
 
-    res.json({ success: true, message: "Wishlist tracked" });
+  clearRecommendationCache();
+  return res.json({ success: true, message: "Activity tracked" });
+}
+
+export async function trackProductView(req, res) {
+  try {
+    return await trackEvent(req, res, "product_view", 1);
   } catch (error) {
-    console.error("trackWishlist error:", error);
-    res.status(500).json({ success: false, message: "Failed to track wishlist" });
+    console.error("trackProductView error:", error);
+    return res.status(500).json({ success: false, message: "Failed to track activity" });
   }
 }
 
-// ─────────────────────────────────────────────
-// GET /api/behavior/me  (optional: for debug)
-// ─────────────────────────────────────────────
+export async function trackWishlist(req, res) {
+  try {
+    return await trackEvent(req, res, "wishlist_add", 3);
+  } catch (error) {
+    console.error("trackWishlist error:", error);
+    return res.status(500).json({ success: false, message: "Failed to track wishlist" });
+  }
+}
+
+export async function trackCartAdd(req, res) {
+  try {
+    return await trackEvent(req, res, "cart_add", 2);
+  } catch (error) {
+    console.error("trackCartAdd error:", error);
+    return res.status(500).json({ success: false, message: "Failed to track cart activity" });
+  }
+}
+
+export async function trackRecommendationClick(req, res) {
+  try {
+    return await trackEvent(
+      req,
+      res,
+      "recommendation_click",
+      2,
+      { algorithmVersion: String(req.body.algorithmVersion || "") }
+    );
+  } catch (error) {
+    console.error("trackRecommendationClick error:", error);
+    return res.status(500).json({ success: false, message: "Failed to track recommendation activity" });
+  }
+}
+
 export async function getMyBehavior(req, res) {
   try {
-    const isDbConnected = mongoose.connection.readyState === 1;
-
-    let behavior = null;
-
-    if (isDbConnected) {
-      behavior = await UserBehavior.findOne({ user: req.user.userId });
-    } else {
-      behavior = getMockBehavior(req.user.userId);
-    }
-
-    res.json({
-      success: true,
-      behavior: behavior || {},
-    });
+    const behavior = mongoose.connection.readyState === 1
+      ? await UserBehavior.findOne({ user: req.user.userId })
+      : getMockBehavior(req.user.userId);
+    return res.json({ success: true, behavior: behavior || {} });
   } catch (error) {
-    res.status(500).json({ success: false, message: "Failed to get behavior data" });
+    console.error("getMyBehavior error:", error);
+    return res.status(500).json({ success: false, message: "Failed to get behavior data" });
   }
 }

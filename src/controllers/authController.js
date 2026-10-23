@@ -8,6 +8,14 @@ import User from "../models/User.js";
 const mockUsers = [
   {
     _id: "admin_101",
+    name: "System Admin",
+    email: "admin@weathercart.com",
+    password: "", 
+    role: "admin",
+    isActive: true,
+  },
+  {
+    _id: "admin_102",
     name: "Admin User",
     email: "admin@example.com",
     password: "", 
@@ -19,7 +27,9 @@ const mockUsers = [
 // Initialize default admin password
 (async () => {
   try {
-    mockUsers[0].password = await bcrypt.hash("admin123", 10);
+    const hashed = await bcrypt.hash("admin123", 10);
+    mockUsers[0].password = hashed;
+    mockUsers[1].password = hashed;
   } catch (e) {}
 })();
 
