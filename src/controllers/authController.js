@@ -3,6 +3,7 @@ import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
 
 import User from "../models/User.js";
+import { connectDB } from "../config/db.js";
 import {
   createVerificationToken,
   hashVerificationToken,
@@ -55,6 +56,14 @@ function databaseUnavailable(res) {
   });
 }
 
+async function ensureDbConnected(res) {
+  if (mongoose.connection.readyState === 1) return true;
+  await connectDB();
+  if (mongoose.connection.readyState === 1) return true;
+  databaseUnavailable(res);
+  return false;
+}
+
 export async function register(req, res) {
   try {
     const name = String(req.body.name || "").trim();
@@ -82,8 +91,8 @@ export async function register(req, res) {
       });
     }
 
-    if (mongoose.connection.readyState !== 1) {
-      return databaseUnavailable(res);
+    if (!(await ensureDbConnected(res))) {
+      return;
     }
 
     const existingUser = await User.findOne({ email });
@@ -153,8 +162,8 @@ export async function login(req, res) {
       });
     }
 
-    if (mongoose.connection.readyState !== 1) {
-      return databaseUnavailable(res);
+    if (!(await ensureDbConnected(res))) {
+      return;
     }
 
     const user = await User.findOne({ email }).select("+password");
@@ -211,8 +220,8 @@ export async function verifyEmail(req, res) {
       });
     }
 
-    if (mongoose.connection.readyState !== 1) {
-      return databaseUnavailable(res);
+    if (!(await ensureDbConnected(res))) {
+      return;
     }
 
     const user = await User.findOne({
@@ -266,8 +275,8 @@ export async function resendVerificationEmail(req, res) {
       });
     }
 
-    if (mongoose.connection.readyState !== 1) {
-      return databaseUnavailable(res);
+    if (!(await ensureDbConnected(res))) {
+      return;
     }
 
     const user = await User.findOne({ email }).select(

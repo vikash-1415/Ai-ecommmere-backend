@@ -92,10 +92,29 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: "2mb" }));
 
+// Ensure database is connected for all API requests (handles cold-starts in serverless)
+app.use(async (req, res, next) => {
+  if (req.path.startsWith("/api") && mongoose.connection.readyState !== 1) {
+    try {
+      await connectDB();
+    } catch {
+      // Handled in individual controllers
+    }
+  }
+  next();
+});
+
 app.get("/api/health", (req, res) => {
+  const readyState = mongoose.connection.readyState;
+  const states = ["disconnected", "connected", "connecting", "disconnecting"];
   res.json({
     success: true,
     message: "WeatherCart API is running",
+    database: {
+      status: states[readyState] || "unknown",
+      connected: readyState === 1,
+      hasUriConfigured: Boolean(process.env.MONGODB_URI),
+    },
   });
 });
 
@@ -128,9 +147,13 @@ app.use((err, req, res, next) => {
 async function startServer() {
   await connectDB();
 
-  app.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
+  if (process.env.NODE_ENV !== "test") {
+    app.listen(PORT, () => {
+      console.log(`Server running on http://localhost:${PORT}`);
+    });
+  }
 }
 
 startServer();
+
+export default app;
