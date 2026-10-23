@@ -204,6 +204,34 @@ export async function sendVerificationEmail(user, token) {
   });
 }
 
+export async function sendPasswordResetEmail(user, token) {
+  const resetUrl = new URL(
+    "/reset-password",
+    `${getFrontendUrl()}/`
+  );
+  resetUrl.searchParams.set("email", user.email);
+  resetUrl.searchParams.set("token", token);
+
+  const html = renderEmail({
+    preheader: "Reset your WeatherCart account password.",
+    eyebrow: "Account Security",
+    title: "Reset your password",
+    intro: `Hi ${user.name}, we received a request to reset your password.`,
+    content:
+      '<div style="border-radius:10px;background:#eff6ff;padding:16px;color:#1e3a8a;font-size:13px;line-height:1.6">This link expires in 1 hour. If you did not request a password reset, you can safely ignore this email. Your password will remain unchanged.</div>',
+    ctaUrl: resetUrl.href,
+    ctaLabel: "Reset password",
+  });
+
+  await getTransporter().sendMail({
+    from: getSender(),
+    to: user.email,
+    subject: "Reset your WeatherCart password",
+    text: `Hi ${user.name},\n\nReset your password using this link: ${resetUrl.href}\n\nThis link expires in 1 hour. If you did not request this, please ignore this email.`,
+    html,
+  });
+}
+
 export async function sendOrderConfirmationEmail(user, order) {
   const orderUrl = `${getFrontendUrl()}/orders`;
   const html = renderEmail({

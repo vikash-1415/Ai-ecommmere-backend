@@ -73,6 +73,16 @@ const userSchema = new mongoose.Schema(
       select: false,
     },
 
+    passwordResetTokenHash: {
+      type: String,
+      select: false,
+    },
+
+    passwordResetExpiresAt: {
+      type: Date,
+      select: false,
+    },
+
     cart: {
       type: [cartItemSchema],
       default: [],

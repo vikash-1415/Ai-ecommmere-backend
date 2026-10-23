@@ -9,6 +9,7 @@ import {
   hashVerificationToken,
   isEmailVerificationEnabled,
   sendVerificationEmail,
+  sendPasswordResetEmail,
 } from "../services/emailService.js";
 
 const VERIFICATION_TOKEN_LIFETIME_MS = 24 * 60 * 60 * 1000;
@@ -97,21 +98,24 @@ export async function register(req, res) {
 
     const existingUser = await User.findOne({ email });
     if (existingUser) {
+      const needsVerification =
+        isEmailVerificationEnabled() && !existingUser.emailVerified;
       return res.status(409).json({
         success: false,
-        code: existingUser.emailVerified ? undefined : "EMAIL_NOT_VERIFIED",
-        message: existingUser.emailVerified
-          ? "Email is already registered"
-          : "Email is registered but not verified. Request a new verification email.",
+        code: needsVerification ? "EMAIL_NOT_VERIFIED" : undefined,
+        message: needsVerification
+          ? "Email is registered but not verified. Request a new verification email."
+          : "Email is already registered. Please sign in.",
       });
     }
 
+    const verificationEnabled = isEmailVerificationEnabled();
     const user = await User.create({
       name,
       email,
       password: await bcrypt.hash(password, 12),
       role: "customer",
-      emailVerified: false,
+      emailVerified: !verificationEnabled,
     });
 
     if (isEmailVerificationEnabled()) {
@@ -192,6 +196,11 @@ export async function login(req, res) {
         code: "EMAIL_NOT_VERIFIED",
         message: "Verify your email before signing in.",
       });
+    }
+
+    if (!user.emailVerified && !isEmailVerificationEnabled()) {
+      user.emailVerified = true;
+      await user.save();
     }
 
     return res.json({
@@ -346,3 +355,112 @@ export async function getMe(req, res) {
     });
   }
 }
+
+export async function forgotPassword(req, res) {
+  try {
+    const email = String(req.body.email || "").trim().toLowerCase();
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: "Email address is required",
+      });
+    }
+
+    if (!(await ensureDbConnected(res))) {
+      return;
+    }
+
+    const user = await User.findOne({ email });
+    // Always return success message for security (don't leak registered emails)
+    if (!user) {
+      return res.json({
+        success: true,
+        message: "If an account exists with this email, a password reset link has been sent.",
+      });
+    }
+
+    const { token, tokenHash } = createVerificationToken();
+    user.passwordResetTokenHash = tokenHash;
+    user.passwordResetExpiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour expiry
+    await user.save();
+
+    try {
+      await sendPasswordResetEmail(user, token);
+    } catch (mailError) {
+      console.error("Password reset email sending error:", mailError.message);
+      return res.status(500).json({
+        success: false,
+        message: "Failed to send reset email. Please ensure SMTP email is configured.",
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: "If an account exists with this email, a password reset link has been sent.",
+    });
+  } catch (error) {
+    console.error("Forgot password error:", error.message);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to process forgot password request",
+    });
+  }
+}
+
+export async function resetPassword(req, res) {
+  try {
+    const email = String(req.body.email || "").trim().toLowerCase();
+    const token = String(req.body.token || "").trim();
+    const password = String(req.body.password || "");
+
+    if (!email || !token || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "Email, token, and new password are required",
+      });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({
+        success: false,
+        message: "Password must contain at least 8 characters",
+      });
+    }
+
+    if (!(await ensureDbConnected(res))) {
+      return;
+    }
+
+    const tokenHash = hashVerificationToken(token);
+    const user = await User.findOne({
+      email,
+      passwordResetTokenHash: tokenHash,
+      passwordResetExpiresAt: { $gt: new Date() },
+    }).select("+password +passwordResetTokenHash +passwordResetExpiresAt");
+
+    if (!user) {
+      return res.status(400).json({
+        success: false,
+        message: "This password reset link is invalid or has expired.",
+      });
+    }
+
+    user.password = await bcrypt.hash(password, 12);
+    user.passwordResetTokenHash = undefined;
+    user.passwordResetExpiresAt = undefined;
+    user.emailVerified = true;
+    await user.save();
+
+    return res.json({
+      success: true,
+      message: "Password reset successfully! You can now sign in with your new password.",
+    });
+  } catch (error) {
+    console.error("Reset password error:", error.message);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to reset password",
+    });
+  }
+}
+
