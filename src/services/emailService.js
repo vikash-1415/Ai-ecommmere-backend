@@ -70,16 +70,39 @@ function getTransporter() {
       throw new Error("SMTP_PORT must be a valid TCP port.");
     }
 
-    transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST,
-      port,
-      secure:
-        process.env.SMTP_SECURE?.toLowerCase() === "true" || port === 465,
-      auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS,
-      },
-    });
+    const isGmail =
+      process.env.SMTP_HOST?.toLowerCase().includes("gmail") ||
+      process.env.SMTP_USER?.toLowerCase().includes("@gmail.com");
+
+    transporter = nodemailer.createTransport(
+      isGmail
+        ? {
+            service: "gmail",
+            auth: {
+              user: process.env.SMTP_USER,
+              pass: process.env.SMTP_PASS,
+            },
+            connectionTimeout: 10000,
+            greetingTimeout: 10000,
+            socketTimeout: 15000,
+          }
+        : {
+            host: process.env.SMTP_HOST,
+            port,
+            secure:
+              process.env.SMTP_SECURE?.toLowerCase() === "true" || port === 465,
+            auth: {
+              user: process.env.SMTP_USER,
+              pass: process.env.SMTP_PASS,
+            },
+            connectionTimeout: 10000,
+            greetingTimeout: 10000,
+            socketTimeout: 15000,
+            tls: {
+              rejectUnauthorized: false,
+            },
+          }
+    );
   }
 
   return transporter;

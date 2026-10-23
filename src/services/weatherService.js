@@ -30,7 +30,23 @@ function findNearestCity(lat, lon) {
   return minDistance < 1.5 ? nearest : { name: "Current Location", country: "" };
 }
 
+// 10-minute in-memory weather cache to prevent 429 rate limits from third-party APIs
+const weatherCache = new Map();
+const WEATHER_CACHE_TTL = 10 * 60 * 1000;
+
 export async function getWeatherByCoordinates(latitude, longitude) {
+  const cacheKey = `${Number(latitude).toFixed(2)},${Number(longitude).toFixed(2)}`;
+  const cached = weatherCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < WEATHER_CACHE_TTL) {
+    return cached.data;
+  }
+
+  // Helper to store in cache before returning
+  const returnWithCache = (weatherData) => {
+    weatherCache.set(cacheKey, { timestamp: Date.now(), data: weatherData });
+    return weatherData;
+  };
+
   // 1. Try OpenWeatherMap if a real API key is configured
   if (
     WEATHER_API_KEY &&
@@ -121,7 +137,7 @@ export async function getWeatherByCoordinates(latitude, longitude) {
 
     const matchedCity = findNearestCity(latitude, longitude);
 
-    return {
+    return returnWithCache({
       location: {
         name: matchedCity.name,
         country: matchedCity.country,
@@ -137,14 +153,14 @@ export async function getWeatherByCoordinates(latitude, longitude) {
       description,
       icon,
       rainProbability,
-    };
+    });
   } catch (error) {
     console.warn("Open-Meteo fallback failed, using simulated climate state:", error.message);
   }
 
   // 3. Fallback deterministic weather estimation
   const nearest = findNearestCity(latitude, longitude);
-  return {
+  return returnWithCache({
     location: {
       name: nearest.name,
       country: nearest.country,
@@ -160,5 +176,5 @@ export async function getWeatherByCoordinates(latitude, longitude) {
     description: "light rain showers",
     icon: "10d",
     rainProbability: 80,
-  };
+  });
 }

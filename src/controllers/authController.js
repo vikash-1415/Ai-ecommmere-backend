@@ -96,16 +96,46 @@ export async function register(req, res) {
       return;
     }
 
-    const existingUser = await User.findOne({ email });
+    const existingUser = await User.findOne({ email }).select(
+      "+emailVerificationLastSentAt"
+    );
     if (existingUser) {
-      const needsVerification =
-        isEmailVerificationEnabled() && !existingUser.emailVerified;
+      if (isEmailVerificationEnabled() && !existingUser.emailVerified) {
+        const lastSent =
+          existingUser.emailVerificationLastSentAt?.getTime() || 0;
+        if (Date.now() - lastSent < VERIFICATION_RESEND_INTERVAL_MS) {
+          return res.status(409).json({
+            success: false,
+            code: "EMAIL_NOT_VERIFIED",
+            message:
+              "Verification email was already sent recently. Please check your inbox (including spam) or wait 1 minute before requesting again.",
+          });
+        }
+
+        try {
+          await issueVerificationEmail(existingUser);
+          return res.status(201).json({
+            success: true,
+            verificationRequired: true,
+            email: existingUser.email,
+            message:
+              "Account already exists but was not verified. A new verification email has been sent to your inbox!",
+            user: serializeUser(existingUser),
+          });
+        } catch (error) {
+          console.error("Verification email resend error:", error.message);
+          return res.status(503).json({
+            success: false,
+            code: "EMAIL_NOT_VERIFIED",
+            message:
+              "Could not send verification email: " + error.message,
+          });
+        }
+      }
+
       return res.status(409).json({
         success: false,
-        code: needsVerification ? "EMAIL_NOT_VERIFIED" : undefined,
-        message: needsVerification
-          ? "Email is registered but not verified. Request a new verification email."
-          : "Email is already registered. Please sign in.",
+        message: "Email is already registered. Please sign in.",
       });
     }
 
