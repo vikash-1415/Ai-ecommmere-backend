@@ -37,6 +37,16 @@ app.use(
         return callback(null, true);
       }
 
+      // Allow all Vercel deployments (*.vercel.app)
+      if (/^https:\/\/[a-zA-Z0-9_-]+\.vercel\.app$/.test(origin)) {
+        return callback(null, true);
+      }
+
+      // Allow localhost on any port
+      if (/^http:\/\/localhost(:\d+)?$/.test(origin)) {
+        return callback(null, true);
+      }
+
       return callback(new Error(`Origin "${origin}" is not allowed by CORS`));
     },
     credentials: true,
